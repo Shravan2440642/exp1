@@ -76,7 +76,7 @@ class GoogleSTT:
         import speech_recognition as sr
         with self.mic as source:
             try:
-                audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=15)
+                audio = self.recognizer.listen(source, timeout=8, phrase_time_limit=15)
                 text = self.recognizer.recognize_google(audio)
                 return text
             except sr.WaitTimeoutError:
@@ -188,11 +188,33 @@ class EdgeTTS:
 # ═══════════════════════════════════════════════════════════════
 
 class WakeWordDetector:
-    """Simple wake word detection using speech recognition."""
+    """Wake word detection with fuzzy matching."""
 
-    def __init__(self, wake_word: str, stt):
+    def __init__(self, wake_word: str, stt, debug=False):
         self.wake_word = wake_word.lower()
         self.stt = stt
+        self.debug = debug
+
+        # common misheard variations of the wake word
+        self.variants = self._generate_variants(self.wake_word)
+
+    def _generate_variants(self, word: str) -> list[str]:
+        """Generate common misheard versions of the wake word."""
+        variants = [word]
+        if word == "jarvis":
+            variants += [
+                "jarvis", "travis", "service", "jarves",
+                "jervis", "jarvus", "jarvas", "jarv",
+                "hey jarvis", "ok jarvis", "yo jarvis",
+                "dear jarvis", "dear travis",
+            ]
+        elif word == "computer":
+            variants += ["computer", "commuter", "competer"]
+        elif word == "friday":
+            variants += ["friday", "fryday", "fry day"]
+        else:
+            variants += [word]
+        return variants
 
     def wait_for_wake_word(self) -> str | None:
         """Listen and return text after wake word, or None."""
@@ -202,17 +224,22 @@ class WakeWordDetector:
 
         text_lower = text.lower()
 
-        # check if wake word is in the text
-        if self.wake_word in text_lower:
-            # extract everything after the wake word
-            idx = text_lower.index(self.wake_word) + len(self.wake_word)
-            remaining = text[idx:].strip()
+        if self.debug:
+            print(f"  [DEBUG] Heard: '{text}'")
 
-            # strip common filler words after wake word
-            for filler in [",", ".", "!", "?", "hey", "ok", "please"]:
-                remaining = remaining.lstrip(filler).strip()
+        # check all variants
+        for variant in self.variants:
+            if variant in text_lower:
+                idx = text_lower.index(variant) + len(variant)
+                remaining = text[idx:].strip()
 
-            return remaining if remaining else ""
+                for filler in [",", ".", "!", "?", "hey", "ok", "please"]:
+                    remaining = remaining.lstrip(filler).strip()
+
+                if self.debug:
+                    print(f"  [DEBUG] Wake word matched: '{variant}'")
+
+                return remaining if remaining else ""
 
         return None
 
@@ -235,7 +262,9 @@ class JarvisVoiceClient:
         # wake word
         self.use_wake = not args.no_wake
         if self.use_wake:
-            self.wake = WakeWordDetector(args.wake_word, self.stt)
+            self.wake = WakeWordDetector(
+                args.wake_word, self.stt, debug=args.debug
+            )
 
     async def start(self):
         import websockets
@@ -322,7 +351,13 @@ class JarvisVoiceClient:
 
             # wait for response (skip typing indicator)
             while True:
-                raw = await ws.recv()
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=30)
+                except asyncio.TimeoutError:
+                    print("  [!] Timeout waiting for response")
+                    await self.tts.speak("Sorry sir, the request timed out.")
+                    break
+
                 data = json.loads(raw)
 
                 if data["type"] == "typing":
@@ -341,7 +376,8 @@ class JarvisVoiceClient:
                     break
 
                 if data["type"] in ("system", "status"):
-                    print(f"  [System] {data.get('text', '')}")
+                    msg = data.get("text", str(data))
+                    print(f"  [System] {msg}")
                     break
 
 
@@ -392,6 +428,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--list-voices", action="store_true",
         help="List available TTS voices and exit",
+    )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Show what the mic hears (debug mode)",
     )
 
     args = parser.parse_args()
